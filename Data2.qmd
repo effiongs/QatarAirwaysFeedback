@@ -1,0 +1,533 @@
+---
+title: "Qatar Data Extraction"
+author: "Sharon Effiong"
+date: today
+format: 
+  pdf:
+    toc: true
+    toc-depth: 2 
+editor: visual
+echo: true
+code-overflow: wrap
+---
+
+# Pre-Lab Instructions
+
+Installing Necessary Packages
+
+``` r
+install.packages(c("RedditExtractoR", "rtoot","word2vec","text2vec","keras","transformers"))
+```
+
+```{r}
+library(RedditExtractoR)
+library(rtoot)
+library(word2vec)
+library(text2vec)
+library(keras)
+library(stringi)
+library(stringr)
+library(rJava)
+library(ggthemes)
+library(tm)
+library(tidytext)
+library(tidyr)
+library(dplyr)
+library(ggplot2)
+library(scales)
+library(readr)
+library(tidyverse)
+library(tokenizers)
+library(magrittr)
+
+```
+
+#### Working dictionary
+
+```{r}
+getwd()
+```
+
+#### Attempt to get whole r/qatarairways subthread
+
+```{r}
+
+subreddit_name <- "qatarairways"
+thread_urls <- find_thread_urls(subreddit = subreddit_name)
+thread_data <- lapply(thread_urls$url, get_thread_content)
+qatar <- do.call(rbind, thread_data)
+```
+
+```{r}
+text_data <- sapply(qatar, function(df) {
+    if ("text" %in% colnames(df)) df$text else NA
+})
+
+text_data <- unlist(text_data)
+text_data <- text_data[!is.na(text_data) & text_data != ""]
+
+```
+
+# Clean and Tokenize Data
+
+Clean
+
+```{r}
+clean_text <- function(text) {
+    text <- iconv(text, to = "UTF-8", sub = "") 
+    text <- gsub("[^\x20-\x7E]", "", text)       
+    text <- gsub("\\s+", " ", text)              
+    return(text)
+}
+
+
+text_data <- sapply(text_data, clean_text)
+
+```
+
+Tokenize
+
+```{r}
+tokens <- text_data %>%
+  word_tokenizer()
+```
+
+```{r}
+it <- itoken(tokens, progressbar = FALSE)
+vocab <- create_vocabulary(it)
+vectorizer <- vocab_vectorizer(vocab)
+
+tcm <- create_tcm(it, vectorizer, skip_grams_window = 5L)
+```
+
+# Part 2: Building and Using Word Embeddings
+
+#### Fit the GloVe Model to the TCM
+
+```{r}
+glove_model <- GlobalVectors$new(rank = 50, x_max = 10)
+word_vectors <- glove_model$fit_transform(tcm, n_iter = 20)
+
+
+```
+
+#### Explore the word embeddings
+
+Retrieving word vector for a single word and create a 50 dimen. vector for it.
+
+```{r}
+best_vector <- word_vectors["experience", , drop = FALSE]
+print(best_vector)
+```
+
+#### Find Words Similar to "Experience"
+
+```{r}
+cos_sim <- sim2(x = word_vectors, y = best_vector, method = "cosine", norm = 'l2')
+head(sort(cos_sim[,1], decreasing = TRUE), 5)
+```
+
+# Part 2: NGram Analysis
+
+#### Convert Data to tibble
+
+```{r}
+
+data_tibble <- tibble(text = text_data)
+```
+
+#### Create bigrams
+
+```{r}
+bigrams <- data_tibble %>%
+  unnest_tokens(bigram, text, token = "ngrams", n = 2)
+
+```
+
+#### Count Bigrams
+
+```{r}
+bigram_counts <- bigrams %>%
+  count(bigram, sort = TRUE)
+```
+
+#### Separate Bigrams
+
+```{r}
+bigrams_separated <- bigrams %>%
+  separate(bigram, into = c("word1", "word2"), sep = " ")
+
+```
+
+#### Custom Stop Words
+
+```{r}
+custom_stop_words <- tibble(word = c("png", "width", "amp", "webp", "auto", "format", "al", "hours", "24", "48", "qatar"))
+all_stop_words <- bind_rows(stop_words, custom_stop_words)
+```
+
+#### Remove Stop Words
+
+```{r}
+filtered_bigrams <- bigrams_separated %>%
+  filter(!word1 %in% all_stop_words$word,
+         !word2 %in% all_stop_words$word,
+         !str_detect(word1, "^[0-9]+$"),
+         !str_detect(word2, "^[0-9]+$"),
+         str_detect(word1, "^[a-zA-Z]+$"),
+         str_detect(word2, "^[a-zA-Z]+$"))
+
+
+```
+
+#### Put Bigrams Back Together
+
+```{r}
+filtered_bigram_counts <- filtered_bigrams %>%
+  unite(bigram, word1, word2, sep = " ") %>%
+  count(bigram, sort = TRUE)
+```
+
+#### Deliverable 15: Visualize Frequent Phrases
+
+```{r}
+filtered_bigram_counts %>%
+  slice_max(n, n = 15) %>%
+  ggplot(aes(x = reorder(bigram, n), y = n)) +
+  geom_bar(stat = "identity", fill = "maroon") +
+  coord_flip() +
+  labs(
+    title = "Most Frequent Phrases in Qatar Airways Data",
+    x = "Bigrams",
+    y = "Frequency"
+  ) +
+  theme_minimal()
+
+```
+
+# Part 3: Key Word Frequency Pre and Post Covid
+
+#### Break up Data
+
+```{r}
+qatar_cleaned <- qatar[sapply(qatar, function(x) is.data.frame(x) && nrow(x) > 0)]
+```
+
+#### Converting Comment ID to character and
+
+```{r}
+qatar_cleaned <- lapply(qatar_cleaned, function(df) {
+  if ("comment_id" %in% colnames(df)) {
+    df$comment_id <- as.character(df$comment_id)
+  }
+  return(df)
+})
+
+qatar_cleaned <- lapply(qatar_cleaned, function(df) {
+  df <- mutate(df, across(where(is.numeric), as.character))
+  return(df)
+})
+```
+
+#### Convert to DF
+
+```{r}
+qatar_df <- bind_rows(qatar_cleaned)
+```
+
+#### Remove NA
+
+```{r}
+qatar_df <- qatar_df %>%
+  filter(!is.na(text))
+```
+
+#### Converting the Date Column
+
+```{r}
+qatar_df <- qatar_df %>%
+  mutate(date = as.Date(date, format = "%Y-%m-%d"))
+
+qatar_df <- qatar_df %>%
+  mutate(period = ifelse(date < as.Date("2020-03-01"), "Pre-COVID", "Post-COVID"))
+
+```
+
+#### Pre Covid Since that Method Did Not Work
+
+```{r}
+qatar_df1 <- read.csv('qatar_airways_reviews.csv', stringsAsFactors = FALSE)
+
+qatar_df1 <- qatar_df1 %>%
+  mutate(
+    Review.Body = tolower(Review.Body), 
+    Review.Body = gsub("[[:punct:]]", " ", Review.Body), 
+    Review.Body = gsub("[[:digit:]]", " ", Review.Body), 
+    Review.Body = stripWhitespace(Review.Body)
+  )
+
+
+tokenized_reviews <- qatar_df1 %>%
+  unnest_tokens(word, Review.Body)
+
+
+tokenized_reviews <- tokenized_reviews %>%
+  anti_join(stop_words, by = "word")
+
+
+qatar_df1 <- qatar_df1 %>%
+  mutate(date = as.Date(Date.Published, format = "%Y-%m-%d")) %>%
+  filter(!is.na(date))
+
+
+qatar_df1 <- qatar_df1 %>%
+  mutate(period = ifelse(Date.Published < as.Date("2020-03-01"), "Pre-COVID", "Post-COVID"))
+
+
+```
+
+#### Extracting Pre and Post Covid
+
+```{r}
+pre_covid <- qatar_df1 %>%
+  filter(period == "Pre-COVID") %>%
+  pull(Review.Body)
+
+post_covid <- qatar_df %>%
+  filter(period == "Post-COVID") %>%
+  pull(text)
+```
+
+```{r}
+custom_stop_words2 <- tibble(word = c( "qatar", 'airways', 'doha', 'flight', 'flying', 'flights'  ))
+all_stop_words2 <- bind_rows(stop_words, custom_stop_words2)
+```
+
+#### Tokenize Pre Covid and Post Covid Data
+
+```{r}
+pre_covid_data <- tibble(text = pre_covid) %>%
+  unnest_tokens(word, text) %>%
+  count(word, sort = TRUE) %>%
+  filter(!word %in% all_stop_words2$word)  
+
+
+post_covid_data <- tibble(text = post_covid) %>%
+  unnest_tokens(word, text) %>%
+  count(word, sort = TRUE) %>%
+  filter(!word %in% all_stop_words2$word)
+```
+
+#### Visualize Data
+
+```{r}
+
+pre_covid_top_words <- pre_covid_data %>%
+  slice_max(n, n = 15)
+
+ggplot(pre_covid_top_words, aes(x = reorder(word, n), y = n)) +
+  geom_bar(stat = "identity", fill = "maroon") +
+  coord_flip() +
+  labs(title = "Top Words in Pre-COVID Period", x = "Words", y = "Frequency") +
+  theme_minimal()
+
+wordcloud(
+  words = pre_covid_data$word, 
+  freq = pre_covid_data$n,     
+  min.freq = 1,               
+  max.words = 100,             
+  random.order = FALSE,        
+  colors = brewer.pal(8, "Dark2")  
+)
+
+
+post_covid_top_words <- post_covid_data %>%
+  slice_max(n, n = 15)
+
+ggplot(post_covid_top_words, aes(x = reorder(word, n), y = n)) +
+  geom_bar(stat = "identity", fill = "Gray") +
+  coord_flip() +
+  labs(title = "Top Words in Post-COVID Period", x = "Words", y = "Frequency") +
+  theme_minimal()
+
+```
+
+```{r}
+
+summary(qatar_df$date)
+pre_covid_check <- qatar_df %>% filter(date < as.Date("2020-03-01"))
+nrow(pre_covid_check)
+```
+
+### Word Frequency
+
+```{r}
+library(quanteda)
+library(quanteda.textstats)
+library(quanteda.textplots)
+library(textdata)
+library(wordcloud)
+library(readtext)
+library(tm)
+library(tidyverse)
+library(quanteda.sentiment)
+library(quanteda.tidy)
+library(reshape2)
+tm::stopwords()
+```
+
+#### Creating VCorpus
+
+```{r}
+qatar_corpus <- Corpus(VectorSource(text_data))
+```
+
+```{r}
+qatar_corpus <- tm_map(qatar_corpus, content_transformer(tolower)) 
+qatar_corpus <- tm_map(qatar_corpus, removeWords, tm::stopwords("english"))  
+qatar_corpus <- tm_map(qatar_corpus, removePunctuation)  
+qatar_corpus <- tm_map(qatar_corpus, removeNumbers)  
+qatar_corpus <- tm_map(qatar_corpus, stripWhitespace)
+```
+
+#### Create Document Term Matrix
+
+```{r}
+dtm <- DocumentTermMatrix(qatar_corpus)
+```
+
+#### Removing everything. Stopwords, punctuation, etc.
+
+```{r}
+word_freq <- sort(colSums(as.matrix(dtm)), decreasing = TRUE)
+
+
+word_freq_df <- data.frame(word = names(word_freq), freq = word_freq)
+```
+
+#### Visualize Frequency
+
+```{r}
+
+top_words <- head(word_freq_df, 20)
+
+ggplot(top_words, aes(x = reorder(word, freq), y = freq)) +
+    geom_bar(stat = "identity") +
+    coord_flip() +
+    labs(title = "Top 20 Most Frequent Words", x = "Words", y = "Frequency")
+```
+
+```{r}
+#| warning: false
+wordcloud(words = word_freq_df$word,
+          freq = word_freq_df$freq,
+          min.freq = 2, 
+          random.order = FALSE,
+          colors = brewer.pal(8, "Dark2"))
+```
+
+# Part 4: Sentiment Analysis
+
+#### Custom Lexicon
+
+```{r}
+
+support_words <- c(
+  "help", "support", "service", "complaint", "resolution", "response",
+  "call", "chat", "agent", "assistance", "feedback", "ticket", "query"
+)
+
+technical_words <- c(
+  "delay", "cancellation", "reschedule", "technical", "engine", "weather",
+  "maintenance", "mechanical", "problem", "issue", "system", "check", 
+  "rebooking", "connection", "itinerary"
+)
+
+negative_words <- c(
+  "delayed", "cancelled", "unprofessional", "rude", "expensive", "dirty",
+  "overbooked", "uncomfortable", "poor", "lost", "damaged", "broken",
+  "crowded", "noisy", "slow", "frustrating", "inconvenient"
+)
+
+services_words <- c(
+  "wifi", "lounge", "seats", "entertainment", "food", "meals", "drinks",
+  "baggage", "check-in", "boarding", "in-flight", "upgrade", "priority",
+  "legroom", "amenities", "crew", "staff", "assistance", "cabin"
+)
+
+positive_words <- c(
+  "comfortable", "luxurious", "amazing", "great", "excellent", "smooth",
+  "perfect", "professional", "friendly", "courteous", "punctual", "delicious",
+  "clean", "relaxing", "accommodating", "welcoming", "efficient"
+)
+
+
+custom_lexicon <- list(
+  positive = positive_words,
+  negative = negative_words,
+  services = services_words,
+  technical = technical_words,
+  support = support_words
+)
+
+```
+
+#### Create a tidy data frame from the custom lexicon
+
+```{r}
+custom_sentiments <- bind_rows(
+  lapply(names(custom_lexicon), function(category) {
+    data.frame(word = custom_lexicon[[category]], sentiment = category, stringsAsFactors = FALSE)
+  })
+)
+```
+
+#### Word counts/ Mapping Words to correspoding sentiment categories
+
+```{r}
+qatar_word_counts <- word_freq_df %>%
+  inner_join(custom_sentiments, by = "word") %>%  
+  group_by(sentiment) %>% 
+  summarize(total_freq = sum(freq)) %>% 
+  arrange(desc(total_freq))
+
+```
+
+```{r}
+ggplot(qatar_word_counts, aes(x = reorder(sentiment, -total_freq), y = total_freq, fill = sentiment)) +
+  geom_bar(stat = "identity") +
+  labs(title = "Sentiment Distribution in Qatar Airways Corpus",
+       x = "Sentiment Category",
+       y = "Word Frequency") +
+  theme_minimal() +
+  theme(legend.position = "none")
+```
+
+#### Arrange by sentiment and frequency
+
+```{r}
+word_sentiment_mapping <- word_freq_df %>%
+  inner_join(custom_sentiments, by = "word") %>%  
+  arrange(sentiment, desc(freq))  
+
+```
+
+```{r}
+top_words_per_sentiment <- word_sentiment_mapping %>%
+  group_by(sentiment) %>%
+  slice_max(freq, n = 10)  
+```
+
+```{r}
+
+ggplot(top_words_per_sentiment, aes(x = reorder(word, freq), y = freq, fill = sentiment)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  facet_wrap(~sentiment, scales = "free") + 
+  labs(
+    title = "Word Frequencies by Sentiment",
+    x = "Words",
+    y = "Frequency"
+  ) +
+  theme_minimal()
+```
